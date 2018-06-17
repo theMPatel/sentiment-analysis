@@ -12,7 +12,8 @@
 import os
 import sys
 import logging
-from . import parse_html
+from .parse_html import parse_wikipedia
+from .genius_scaper import extract_lyrics
 
 _LOG_FILE_DIR = os.path.join(os.getcwd(), 'logs')
 
@@ -40,7 +41,7 @@ def set_up_logging(
 
 def main():
 
-	
+	pass
 
 if __name__ == '__main__':
 

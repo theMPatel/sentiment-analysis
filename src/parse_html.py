@@ -9,178 +9,36 @@
 import os
 import re
 import sys
+import json
+import time
 import logging
 import requests
 import traceback
-from warnings import warn
-from html.parser import HTMLParser
+from tqdm import *
+import lxml.html as l_html
+from functools import partial
+from urllib.parse import urljoin
+from collections import defaultdict
+from multiprocessing import Pool, Queue, Lock
+
+from tools import (
+    get_nonjson
+)
 
 _base_url = 'http://en.wikipedia.org/'
 _parse_url = 'https://en.wikipedia.org/wiki/List_of_years_in_hip_hop_music'
 _year_link_parser = re.compile(r'([0-9]{4})_in_hip_hop_music')
 _data_dir = os.path.join(os.getcwd(), 'data_path')
+_THREADS = 8
 
 if not os.path.exists(_data_dir):
     os.makedirs(_data_dir)
 
-class WikiLinksParser(HTMLParser):
-    """
-    Class to specifically parse wiki links for this project
-    """
+def replace_quotes(string):
+    return string.replace('"', '').replace("'", "")
 
-    def __init__(self, *, convert_charrefs=True):
-        super().__init__(convert_charrefs=convert_charrefs)
-        self._wiki_links = []
-
-    # Overridable -- handle start tag
-    def handle_starttag(self, tag, attrs):
-        tags_to_process = ('a')
-        if tag in tags_to_process:
-            # Comes back as a tuple of key-value
-            for attr_type, value in attrs:
-                if attr_type == 'href':
-                    if '/wiki/' in value:
-                        self.wiki_links.append(value)
-
-    @property
-    def wiki_links(self):
-        return self._wiki_links
-
-class HTMLTableCol(object):
-
-    def __init__(self, tag, validator=None):
-        self._tag = tag
-        self._data = []
-        self.set_validator(validator)
-
-    def set_validator(self, validator):
-
-        if callable(validator):
-            # Rebind whatever function that is passed to the class
-            # so that we can call the validation method directly
-            # from the object
-            self.validator = validator.__get__(self, type(self))
-
-        else:
-            warn('No validation method for table data provided,'
-            ' using default', Warning)
-
-    def validator(self, val=None):
-        return True
-
-    @property
-    def tag(self):
-        return self._tag
-
-    @property
-    def data(self):
-        return self._data
-
-class HTMLTableRow(object):
-
-    def __init__(self):
-        self._data = []
-    
-    def add(self, table_col):
-        if not isinstance(table_col, HTMLTableCol):
-            raise RuntimeError('Table col must be of type HTMLTableCol'
-                ' got {} instead'.format(type(table_col)))
-
-        self._data.append(table_col)
-
-    @property
-    def data(self):
-        return self._data
-
-    def __len__(self):
-        return len(self._data)
-
-    def __iter__(self):
-        return iter(self._data)
-
-class HTMLTable(object):
-
-    def __init__(self):
-        self._table = []
-
-    def add(self, table_row):
-        self._table.append(table_row)
-
-    def __iter__(self):
-        return iter(self._table)
-
-table_header_tag = 'th'
-table_tag = 'table'
-table_data_tag = 'td'
-table_row_tag = 'tr'
-
-def check_wiki_table(attrs):
-
-    for attr, value in attrs:
-        if attr == 'class' and value == 'wikitable':
-            return True
-
-    return False
-
-class WikiTableParser(HTMLParser):
-
-    def __init__(self, convert_charrefs=True):
-        super().__init__(convert_charrefs=convert_charrefs)
-        self._tables = []
-        self._in_table = False
-        self._curr_table = None
-        self._curr_row = None
-        self._curr_col = None
-
-    def handle_starttag(self, tag, attrs):
-
-        print('Start: {}'.format(tag))
-        if tag == table_tag:
-            if check_wiki_table(attrs):
-                self._in_table = True
-                self._curr_table = HTMLTable()
-                print('\tCreated new table')
-
-        if self._in_table:
-
-            if tag == table_row_tag:
-                self._curr_row = HTMLTableRow()
-                print('\tCreated new row')
-
-            elif tag in (table_header_tag, table_data_tag):
-                self._curr_col = HTMLTableCol(tag)
-                print('\tCreated new col')
-
-            if self._curr_col is not None:
-                for attr, value in attrs:
-
-                    if attr == 'href':
-                        self._curr_col.data.append(value)
-
-    def handle_endtag(self, tag):
-        print('End: {}'.format(tag))
-
-        if self._in_table:
-            if tag == table_tag:
-                self._in_table = False
-                self._tables.append(self._curr_table)
-                self._curr_table = None
-                print('\tClosed table')
-
-            elif tag == table_row_tag:
-                self._curr_table.add(self._curr_row)
-                self._curr_row = None
-                print('\tClosed row')
-
-            elif tag in (table_header_tag, table_data_tag):
-                self._curr_row.add(self._curr_col)
-                self._curr_col = None
-                print('\tClosed col')
-
-    @property
-    def tables(self):
-        return self._tables
-    
+def replace_space(element):
+    return element.text_content().replace(u'\xa0', u' ')
 
 def extract_links_match_obj(links, matcher):
     to_return = []
@@ -189,7 +47,7 @@ def extract_links_match_obj(links, matcher):
         match = matcher.search(l)
 
         if match:
-            to_return.append(match.group(0))
+            to_return.append(l)
 
     return to_return
 
@@ -203,36 +61,218 @@ def get_link_html(link):
     if r.status_code == 200:
         return r.text
 
-def parse_html(html):
-    pass
+link_xpath = '//a/@href'
+def get_wiki_links(link):
+    html = get_link_html(link)
+    root = l_html.fromstring(html)
+    links = []
 
-def run_workflow(dl_link=_parse_url):
-    pass
+    for l in root.xpath(link_xpath):
+
+        if 'wiki' in l:
+            links.append(urljoin(_base_url, l))
+
+    return links
+
+def get_year_links(link):
+    return extract_links_match_obj(
+        get_wiki_links(link),
+        _year_link_parser
+    )
+
+wikitable_xpath ='//table[@class="wikitable"]'
+wiki_tracklist_xpath = '//table[@class="tracklist"]'
+table_header_xpath = './/th'
+table_row_xpath = './/tr'
+table_data_xpath = './/td'
+descendant_xpath = 'descendant::*'
+def get_tables(link, table_xpath=None, prefer_text=False):
+
+    tables_here = []
+    html = get_link_html(link)
+    root = l_html.fromstring(html)
+
+    for table in root.xpath(table_xpath):
+        tables_here.append(parse_table(table, prefer_text))
+
+    return tables_here
+
+def dict_to_list(dict_table):
+    for i, row in sorted(dict_table.items()):
+        cols = []
+
+        for j, col in sorted(row.items()):
+            cols.append(col)
+
+        yield cols
+
+def parse_table(etable, prefer_text):
+
+    dict_table = defaultdict(lambda: defaultdict(str))
+    for row_i, row in enumerate(etable.xpath(table_row_xpath)):
+
+        for col_i, col in enumerate(row.xpath('{}|{}'.format(
+            table_data_xpath, table_header_xpath))):
+
+            col_span = int(col.get('colspan', 1))
+            row_span = int(col.get('rowspan',1))
+            links = []
+            text = replace_space(col)
+            for info in col.xpath(descendant_xpath):
+                if 'href' in info.attrib:
+                    links.append(info.get('href'))
+
+            links = [l for l in links if 'wiki' in l]
+            links = list(map(lambda tail: urljoin(_base_url, tail), links))
+
+            while row_i in dict_table and col_i in dict_table[row_i]:
+                col_i += 1
+
+            for i in range(row_i, row_i + row_span):
+                for j in range(col_i, col_i + col_span):
+
+                    if prefer_text:
+                        dict_table[i][j] = text
+                    
+                    elif len(links) == 1:
+                        dict_table[i][j] = links[0]
+                    
+                    elif len(links):
+                        dict_table[i][j] = links
+                    
+                    else:
+                        dict_table[i][j] = text
+
+    return list(dict_to_list(dict_table))
+
+def get_table_col(tables, attr):
+
+    items = set()
+
+    for table in tables:
+        
+        if not table:
+            continue
+
+        index = -1
+        for i, row in enumerate(table):
+            lower = list(map(str.lower, row))
+            
+            if attr in lower:
+                index = i
+                break
+
+        if index == -1:
+            continue
+
+        attr_index = lower.index(attr)
+
+        for row in table[index:]:
+
+            if attr_index >= len(row):
+                continue
+
+            if isinstance(row[attr_index], list):
+                items.add(frozenset(row[attr_index]))
+            else:
+                items.add(row[attr_index])
+
+    final_list = []
+    for i in items:
+
+        if isinstance(i, frozenset):
+            final_list.append(list(i))
+        else:
+            final_list.append(i)
+
+    return final_list
 
 
+
+def execute(f, out_file, *args, **kwargs):
+
+    if os.path.exists(out_file):
+        print('Already processed!')
+
+        with open(out_file, 'r') as f:
+            data = json.load(f)
+
+        return data
+
+    tqdm.write('Processing')
+    to_dump = f(*args, **kwargs)
+
+    with open(out_file, 'w') as out_f:
+        json.dump(to_dump, out_f)
+
+def multi_target(f):
+
+    if callable(f):
+
+        lock.acquire()
+        try:
+            print('PID: {} working'.format(os.getpid()))
+
+        finally:
+            lock.release()
+
+        return f()
+    
+    return None
+
+def lock_init(l):
+    global lock
+    lock = l
+
+def multi_exec(f, threads, target_arglist, *f_args, **f_kwargs):
+
+    if not isinstance(threads, int):
+        raise RuntimeError('Threads must be int type, got: {}'
+            ' instead'.format(type(threads)))
+
+    funcs = [partial(f, a, *f_args, **f_kwargs) for a in target_arglist]
+
+    l = Lock()
+    with Pool(processes=threads, initializer=lock_init, initargs=(l,)) as p:
+        results = p.map(multi_target, funcs)
+    
+    return results
+
+def parse_wikipedia(dl_link=_parse_url):
+
+    wikilinks_file = os.path.join(_data_dir, 'wiki_links.json')
+
+    wiki_links_data = execute(
+        get_year_links,
+        wikilinks_file,
+        _parse_url
+    )
+
+    artists_table = os.path.join(_data_dir, 'artists.json')
+
+    artists_tables = execute(
+        multi_exec,
+        artists_table,
+        get_tables,
+        _THREADS,
+        wiki_links_data,
+        table_xpath=wikitable_xpath,
+        prefer_text=True
+    )
+
+    all_artists = os.path.join(_data_dir, 'artists_names.json')
+
+    results = []
+    for tables in artists_tables:
+
+        results.extend(
+            get_table_col(tables, 'artist')
+        )
+
+    with open(all_artists, 'w') as f:
+        json.dump(results, f)
+
+    return set(results)
 
 if __name__ == '__main__':
-
-    to_test = 'https://en.wikipedia.org/wiki/1980_in_hip_hop_music'
-    html_data = get_link_html(to_test)
-
-    table_parser = WikiTableParser()
-    table_parser.feed(html_data)
-
-
-    for table in table_parser.tables:
-
-        for row in table:
-
-            for col in row:
-
-                print(col.data)
-# if __name__ == '__main__':
-
-#     test_str = '<li><a href="/wiki/1990_in_hip_hop_music" title="1990 in hip hop music">1990 in hip hop music</a></li>'
-
-#     parser = MyHTMLParser()
-#     parser.feed(test_str)
-#     print(parser._wiki_links)
-
-#     main()
+    run_workflow()
