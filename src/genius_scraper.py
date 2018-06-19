@@ -22,7 +22,8 @@ from multiprocessing import Pool, Queue, Lock
 
 from tools import (
     counter,
-    get_nonjson
+    get_nonjson,
+    parse_datetime
 )
 
 
@@ -86,7 +87,7 @@ def get_song(song_id, sleep=DEFAULT_SLEEP):
 
     response = session.get(url, params={'text_format': 'plain'}).json()
     
-    return response.get('Response', None)
+    return response.get('response', None)
 
 def get_search(query, sleep=DEFAULT_SLEEP):
     time.sleep(sleep)
@@ -170,6 +171,18 @@ def get_songs(artist_id):
     return song_ids
 
 def get_song_date(song_id):
+    song = get_song(song_id).get('song', None)
+
+    if song is None:
+        return
+
+    date_string = song.get('release_date', None)
+
+    if date_string:
+        date_obj = parse_datetime(date_string)
+
+        if date_obj:
+            return date_obj
 
     
 def extract_lyrics(artists, genius_api):
@@ -191,13 +204,12 @@ if __name__ == '__main__':
     RUNTIME_ARGS['session'] = requests.Session()
     RUNTIME_ARGS['session'].headers.update(RUNTIME_ARGS['headers'])
 
-    artist_id = consensus_artist('Kanye west')
-    print('Kanye West -> {}'.format(artist_id))
+    #artist_id = consensus_artist('Kanye west')
+    #print('Kanye West -> {}'.format(artist_id))
 
-    kwest_songs = get_songs(artist_id)
-
-    with open('Kanye_songs.json', 'w') as f:
-        json.dump(kwest_songs, f, default=get_nonjson)
+    mercy_song_data = get_song(70324)
+    with open('mercy.json', 'w') as f:
+        json.dump(mercy_song_data, f, default=get_nonjson)
 
     # headers = {'Authorization': 'Bearer {}'.format(ACCESS_TOKEN)}
 

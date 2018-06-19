@@ -52,8 +52,7 @@ def parse_datetime(string):
         except:
             continue
 
-    raise ValueError('No available format to parse: {}'.format(
-        string))
+    return
 
 def get_nonjson(obj):
 
@@ -62,3 +61,20 @@ def get_nonjson(obj):
 
     return obj
 
+
+def popen(args, stdout=None, stderr=None, cwd=None, shell=False):
+
+    if not isinstance(args, list):
+        raise RuntimeError('Provided arguments must be of type list')
+
+    if not stderr:
+        stderr = sp.PIPE
+
+    if not stdout:
+        stdout = sp.PIPE
+
+    child = sp.Popen(args, stdout=stdout, stderr=stderr, cwd=cwd, shell=shell)
+
+    out, err = child.communicate()
+
+    return child.returncode, out, err
