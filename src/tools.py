@@ -9,6 +9,7 @@
 import os
 import re
 import sys
+import subprocess as sp
 from datetime import datetime
 
 wikitable_xpath ='//table[@class="wikitable"]'
@@ -18,6 +19,7 @@ table_row_xpath = './/tr'
 table_data_xpath = './/td'
 descendant_xpath = 'descendant::*'
 link_xpath = '//a/@href'
+lyrics_xpath = '//*[@class="lyrics"]'
 
 
 def counter(l):
@@ -62,7 +64,7 @@ def get_nonjson(obj):
     return obj
 
 
-def popen(args, stdout=None, stderr=None, cwd=None, shell=False):
+def popen(args, stdout=None, stderr=None, cwd=None, shell=False, comm=True):
 
     if not isinstance(args, list):
         raise RuntimeError('Provided arguments must be of type list')
@@ -75,6 +77,10 @@ def popen(args, stdout=None, stderr=None, cwd=None, shell=False):
 
     child = sp.Popen(args, stdout=stdout, stderr=stderr, cwd=cwd, shell=shell)
 
-    out, err = child.communicate()
+    if comm:
+        out, err = child.communicate()
+        return child.returncode, out, err
 
-    return child.returncode, out, err
+    else:
+        return (False, '', '')
+
